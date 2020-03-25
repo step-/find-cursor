@@ -1,6 +1,7 @@
 /*
  * http://code.arp242.net/find-cursor
  * Copyright © 2015-2017 Martin Tournoij <martin@arp242.net>
+ * Copyright © 2020 step https://github.com/step-/find-cursor (forked)
  * See below for full copyright
  */
 
@@ -25,7 +26,7 @@ int parse_num(int ch, char *opt, char *name);
 void draw(
 	char *name, Display *display, int screen,
 	int size, int distance, int wait, int line_width, char *color_name,
-	int follow, int transparent, int grow, int outline, int repeat);
+	int follow, int transparent, int grow, int outline, int repeat, int symmetry);
 
 static struct option longopts[] = {
 	{"help",          no_argument,       NULL, 'h'},
@@ -39,6 +40,7 @@ static struct option longopts[] = {
 	{"grow",          no_argument,       NULL, 'g'},
 	{"outline",       no_argument,       NULL, 'o'},
 	{"repeat",        required_argument, NULL, 'r'},
+	{"symmetry",      required_argument, NULL, 'S'},
 	{NULL, 0, NULL, 0}
 };
 
@@ -51,9 +53,10 @@ void usage(char *name) {
 	printf("  -d, --distance      Distance between the circles in pixels.\n");
 	printf("  -l, --line-width    Width of the lines in pixels.\n");
 	printf("  -w, --wait          Time to wait before drawing the next circle in\n");
-	printf("                      microseconds.\n");
+	printf("                      tenths of millisecond.\n");
 	printf("  -c, --color         Color; can either be an X11 color name or RGB as hex.\n");
 	printf("  -g, --grow          Grow the animation in size, rather than shrinking it.\n");
+	printf("  -u, --symmetry      Symmetry 0 or 1 draws the circles in slightly different ways.\n");
 	printf("\n");
 	printf("Extra options:\n");
 	printf("  -f, --follow        Follow the cursor position as the cursor is moving.\n");
@@ -68,7 +71,7 @@ void usage(char *name) {
 	printf("\n");
 	printf("Examples:\n");
 	printf("  The defaults:\n");
-	printf("  %s --size 320 --distance 40 --wait 400 --line-width 4 --color black\n\n", name);
+	printf("  %s --size 320 --distance 40 --wait 400 --line-width 4 --color black --symmetry 0\n\n", name);
 	printf("  Draw a solid circle:\n");
 	printf("  %s --size 100 --distance 1 --wait 20 --line-width 1\n\n", name);
 	printf("  Always draw a full circle on top of the cursor:\n");
@@ -94,16 +97,17 @@ int main(int argc, char* argv[]) {
 	int size = 320;
 	int distance = 40;
 	int wait = 400;
-	int line_width = 4;
+	int line_width = 4; // both 0 and 1 draw a 1-pixel line but 0("thin line") is server-dependent therefore unpredictable
 	char color_name[64] = "black";
 	int follow = 0;
 	int transparent = 0;
 	int grow = 0;
 	int outline = 0;
 	int repeat = 0;
+	int symmetry = 0;
 
 	int ch;
-	while ((ch = getopt_long(argc, argv, "hs:d:w:l:c:r:ftgo", longopts, NULL)) != -1)
+	while ((ch = getopt_long(argc, argv, "hs:d:w:l:c:r:S:ftgo", longopts, NULL)) != -1)
 		switch (ch) {
 		case 's':
 			size = parse_num(ch, optarg, argv[0]);
@@ -140,6 +144,9 @@ int main(int argc, char* argv[]) {
 			if (repeat == 0)
 				repeat = -1;
 			break;
+		case 'S':
+			symmetry = parse_num(ch, optarg, argv[0]);
+			break;
 		default:
 			usage(argv[0]);
 			exit(1);
@@ -169,7 +176,7 @@ int main(int argc, char* argv[]) {
 	do {
 		draw(argv[0], display, screen,
 			size, distance, wait, line_width, color_name,
-			follow, transparent, grow, outline, repeat);
+			follow, transparent, grow, outline, repeat, symmetry);
 	} while (repeat == -1 || repeat--);
 
 	XCloseDisplay(display);
@@ -178,12 +185,12 @@ int main(int argc, char* argv[]) {
 void draw(
 	char *name, Display *display, int screen,
 	int size, int distance, int wait, int line_width, char *color_name,
-	int follow, int transparent, int grow, int outline, int repeat
+	int follow, int transparent, int grow, int outline, int repeat, int symmetry
 ) {
 	// Get the mouse cursor position and size.
 	XFixesCursorImage *cursor = XFixesGetCursorImage(display);
 
-	// Create a window at the mouse position
+	// Create a window centered in the mouse hotspot.
 	Window window;
 	XSetWindowAttributes window_attr;
 	window_attr.override_redirect = 1;
@@ -194,8 +201,8 @@ void draw(
 		window_attr.colormap = XCreateColormap(display, DefaultRootWindow(display), vinfo.visual, AllocNone);
 		window_attr.background_pixel = 0;
 		window = XCreateWindow(display, XRootWindow(display, screen),
-			cursor->x - size/2 - cursor->width/2,   // x position
-			cursor->y - size/2 - cursor->height/2,  // y position
+			cursor->x - (size + cursor->width + cursor->xhot)/2,   // x position
+			cursor->y - (size + cursor->height + cursor->yhot)/2,  // y position
 			size, size,                             // width, height
 			4,                                      // border width
 			vinfo.depth,                            // depth
@@ -206,8 +213,8 @@ void draw(
 	}
 	else {
 		window = XCreateWindow(display, XRootWindow(display, screen),
-			cursor->x - size/2 - cursor->width/2,  // x position
-			cursor->y - size/2 - cursor->height/2, // y position
+			cursor->x - (size + cursor->width + cursor->xhot)/2,  // x position
+			cursor->y - (size + cursor->height + cursor->yhot)/2, // y position
 			size, size,                            // width, height
 			4,                                     // border width
 			DefaultDepth(display, screen),         // depth
@@ -221,14 +228,22 @@ void draw(
 	XGCValues xgcv;
 	Pixmap shape_mask = XCreatePixmap(display, window, size, size, 1);
 	GC part_shape = XCreateGC(display, shape_mask, 0, &xgcv);
+	// Erase it as a mask.
 	XSetForeground(display, part_shape, 0);
 	XFillRectangle(display, shape_mask, part_shape, 0, 0, size, size);
 	XSetForeground(display, part_shape, 1);
+	// Draw + Fill for symmetry cf. https://gitlab.freedesktop.org/xorg/xserver/issues/404
+	if (1 == symmetry)
+		XDrawArc(display, shape_mask, part_shape,
+			0, 0,         // x, y position
+			size, size,   // Size
+			0, 360 * 64); // Make it a full circle
 	XFillArc(display, shape_mask, part_shape,
 		0, 0,         // x, y position
 		size, size,   // Size
 		0, 360 * 64); // Make it a full circle
 
+	// Mask the parent for event managing and the window for drawing.
 	XShapeCombineMask(display, window, ShapeBounding, 0,0, shape_mask, ShapeSet);
 	XShapeCombineMask(display, window, ShapeClip, 0,0, shape_mask, ShapeSet);
 	XFreePixmap(display, shape_mask);
@@ -277,6 +292,11 @@ void draw(
 	unsigned long valuemask = 0;
 	GC gc = XCreateGC(display, window, valuemask, &values);
 
+	// Draw the mouse position (TEST)
+	//XSetForeground(display, gc, 0);
+	//XSetLineAttributes(display, gc, 1, LineSolid, CapButt, JoinBevel);
+	//XDrawPoint(display, window, gc, size/2, size/2);
+
 	Colormap colormap = DefaultColormap(display, screen);
 	XColor color;
 	XAllocNamedColor(display, colormap, color_name, &color, &color);
@@ -297,8 +317,9 @@ void draw(
 	}
 
 	// Draw the circles
-	int i = 1;
-	for (i=1; i<=size; i+=distance) {
+	// i in [0..size-1] looks best for concentric circles
+	// i in [1..size] looks best for a filled disc
+	for (int i = (0 == symmetry ? 1 : 0); i < (0 == symmetry ? size + 1 : size); i += distance) {
 		if (follow) {
 			XClearWindow(display, window);
 		}
@@ -307,13 +328,14 @@ void draw(
 		if (grow)
 			cs = i;
 		else
-			cs = size - i;
+			// size-1 == i's max value so growing and shrinking draw the same circles for size multiple of distance
+			cs = (0 == symmetry ? size : size - 1) - i;
 
 		if (outline) {
 			XSetLineAttributes(display, gc, line_width+2, LineSolid, CapButt, JoinBevel);
 			XSetForeground(display, gc, color2.pixel);
 			XDrawArc(display, window, gc,
-				size/2 - cs/2, size/2 - cs/2, // x, y position
+				(size - cs)/2, (size - cs)/2, // x, y position
 				cs, cs,                       // Size
 				0, 360 * 64);                 // Make it a full circle
 
@@ -323,15 +345,16 @@ void draw(
 		}
 
 		XDrawArc(display, window, gc,
-			size/2 - cs/2, size/2 - cs/2, // x, y position
+			(size - cs)/2, (size - cs)/2, // x, y position
 			cs, cs,                       // Size
 			0, 360 * 64);                 // Make it a full circle
 
 		if (follow) {
 			XFixesCursorImage *cursor = XFixesGetCursorImage(display);
 			XMoveWindow(display, window,
-					cursor->x - size/2 - cursor->width/2,
-					cursor->y - size/2 - cursor->height/2);
+					// keep centered in the pointer's hotspot
+					cursor->x - (size + cursor->width + cursor->xhot)/2,
+					cursor->y - (size + cursor->height + cursor->yhot)/2);
 		}
 
 		XSync(display, False);
@@ -347,6 +370,7 @@ void draw(
  *  The MIT License (MIT)
  *
  *  Copyright © 2015-2017 Martin Tournoij
+ *  Copyright © 2020 step
  *
  *  Permission is hereby granted, free of charge, to any person obtaining a copy
  *  of this software and associated documentation files (the "Software"), to
